@@ -1,16 +1,97 @@
-# React + Vite
+# CRUD React TypeScript + Express
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Petit CRUD basic avec un front React + TypeScript et une API Node.js + Express.
 
-Currently, two official plugins are available:
+## Installation
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```bash
+npm install
+```
 
-## React Compiler
+## Base PostgreSQL
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Le serveur lit la connexion dans `.env`.
 
-## Expanding the ESLint configuration
+```env
+PORT=3001
+APP_PORT=3001
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=spotify_blind_test
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=postgres
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/spotify_blind_test
+DATABASE_URL_DOCKER=postgresql://postgres:postgres@db:5432/spotify_blind_test
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Tu dois creer une base PostgreSQL, puis la table `todos`.
+
+```sql
+CREATE DATABASE spotify_blind_test;
+```
+
+Connecte-toi ensuite a cette base et lance:
+
+```sql
+CREATE TABLE IF NOT EXISTS todos (
+  id SERIAL PRIMARY KEY,
+  title VARCHAR(255) NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  done BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
+
+Le meme script est disponible dans `db/schema.sql`.
+
+## Lancer le projet
+
+```bash
+npm run dev
+```
+
+Le front tourne sur `http://localhost:5173`.
+L'API tourne sur `http://localhost:3001`.
+
+## Lancer avec Docker
+
+Docker lance l'app Node/Express et une base PostgreSQL. Le front React est build puis servi par Express.
+Les ports, identifiants Postgres et URLs de connexion sont lus depuis `.env`.
+
+```bash
+docker compose up --build
+```
+
+L'application est disponible sur `http://localhost:3001`.
+
+La base PostgreSQL est creee automatiquement avec:
+
+- base: `spotify_blind_test`
+- user: `postgres`
+- password: `postgres`
+- port local: `5432`
+
+Au premier demarrage, Docker execute automatiquement `db/schema.sql` pour creer la table `todos`.
+
+Pour arreter:
+
+```bash
+docker compose down
+```
+
+Pour supprimer aussi les donnees PostgreSQL Docker:
+
+```bash
+docker compose down -v
+```
+
+## Routes API
+
+- `GET /api/todos`
+- `GET /api/todos/:id`
+- `POST /api/todos`
+- `PUT /api/todos/:id`
+- `DELETE /api/todos/:id`
+
+Les donnees sont stockees dans PostgreSQL.
