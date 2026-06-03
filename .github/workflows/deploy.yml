@@ -17,7 +17,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            cd /var/www/mon-site
+            cd /home/ubuntu/spotify-blind-test
             git pull origin main
             docker compose up -d --build
             docker image prune -f
