@@ -203,9 +203,29 @@ function mapTrack(track) {
   };
 }
 
+function getPlaylistItemTrack(item) {
+  return item?.track ?? item?.item ?? null;
+}
+
+function mapPlaylistItemsToTracks(items = []) {
+  return items
+    .map((item) => getPlaylistItemTrack(item))
+    .filter((track) => track?.type === 'track')
+    .map((track) => mapTrack(track))
+    .filter((track) => track.uri);
+}
+
 function normalizeSpotifyId(value) {
   const raw = String(value ?? '').trim();
   return raw.includes(':') ? raw.split(':').at(-1) : raw;
+}
+
+function addQueryParams(url, params) {
+  const parsed = new URL(url);
+  for (const [key, value] of Object.entries(params)) {
+    parsed.searchParams.set(key, value);
+  }
+  return parsed.toString();
 }
 
 function mapSession(row) {
@@ -620,44 +640,66 @@ async function fetchUserPlaylists(session) {
 
 async function fetchPlaylistTracks(session, playlistId, tracksHref = '') {
   const cleanPlaylistId = normalizeSpotifyId(playlistId);
-  const userTracksUrl = tracksHref
-    ? `${tracksHref}${tracksHref.includes('?') ? '&' : '?'}limit=50&market=from_token&additional_types=track`
-    : `https://api.spotify.com/v1/playlists/${encodeURIComponent(
-        cleanPlaylistId,
-      )}/tracks?limit=50&market=from_token&additional_types=track`;
-  const appTracksUrl = `https://api.spotify.com/v1/playlists/${encodeURIComponent(
+  const playlistItemsUrl = `https://api.spotify.com/v1/playlists/${encodeURIComponent(
     cleanPlaylistId,
-  )}/tracks?limit=50&additional_types=track`;
+  )}/items`;
+  const tracksUrl = addQueryParams(playlistItemsUrl, { limit: '50' });
+  const tracksWithTypesUrl = addQueryParams(playlistItemsUrl, {
+    limit: '50',
+    additional_types: 'track',
+  });
 
   const attempts = [
-    () => fetchPlaylistTracksFromUrl((url) => spotifyFetch(session, url), userTracksUrl),
-    () => fetchPlaylistTracksFromUrl(spotifyAppFetch, appTracksUrl),
-    () =>
+    {
+      label: 'playlist items with user token',
+      run: () => fetchPlaylistTracksFromUrl((url) => spotifyFetch(session, url), tracksUrl),
+    },
+    {
+      label: 'playlist items with user token and additional_types',
+      run: () =>
+        fetchPlaylistTracksFromUrl((url) => spotifyFetch(session, url), tracksWithTypesUrl),
+    },
+    {
+      label: 'playlist details with user token',
+      run: () =>
       fetchPlaylistTracksFromPlaylistDetails(
         (url) => spotifyFetch(session, url),
         cleanPlaylistId,
-        true,
       ),
-    () => fetchPlaylistTracksFromPlaylistDetails(spotifyAppFetch, cleanPlaylistId, false),
+    },
+    {
+      label: 'playlist items with app token',
+      run: () => fetchPlaylistTracksFromUrl(spotifyAppFetch, tracksUrl),
+    },
+    {
+      label: 'playlist details with app token',
+      run: () => fetchPlaylistTracksFromPlaylistDetails(spotifyAppFetch, cleanPlaylistId),
+    },
   ];
 
-  let lastError = null;
+  const forbiddenReasons = [];
+  const emptyReasons = [];
   for (const attempt of attempts) {
     try {
-      const tracks = await attempt();
+      const tracks = await attempt.run();
       if (tracks.length > 0) {
         return tracks;
       }
+      emptyReasons.push(attempt.label);
     } catch (error) {
       if (!(error instanceof SpotifyPlaylistForbiddenError)) {
         throw error;
       }
-      lastError = error;
+      forbiddenReasons.push(`${attempt.label}: ${error.message}`);
     }
   }
 
-  if (lastError) {
-    throw lastError;
+  if (forbiddenReasons.length > 0) {
+    const emptyDetails =
+      emptyReasons.length > 0 ? ` Fallbacks vides: ${emptyReasons.join(' | ')}.` : '';
+    throw new SpotifyPlaylistForbiddenError(
+      `Playlist Spotify refusee. Details: ${forbiddenReasons.join(' | ')}.${emptyDetails}`,
+    );
   }
 
   return [];
@@ -673,7 +715,7 @@ async function fetchPlaylistTracksFromUrl(fetcher, firstUrl) {
     const spotifyResponse = await fetcher(nextUrl);
     if (!spotifyResponse.ok) {
       if (spotifyResponse.status === 403) {
-        throw new SpotifyPlaylistForbiddenError('Playlist Spotify refusee.');
+        throw new SpotifyPlaylistForbiddenError(await readSpotifyError(spotifyResponse));
       }
 
       const message = await readSpotifyError(spotifyResponse);
@@ -683,33 +725,25 @@ async function fetchPlaylistTracksFromUrl(fetcher, firstUrl) {
     }
 
     const payload = await spotifyResponse.json();
-    tracks.push(
-      ...payload.items
-        .filter((item) => item.track?.type === 'track')
-        .map((item) => mapTrack(item.track))
-        .filter((track) => track.uri),
-    );
+    tracks.push(...mapPlaylistItemsToTracks(payload.items));
     nextUrl = payload.next;
   }
 
   return tracks;
 }
 
-async function fetchPlaylistTracksFromPlaylistDetails(fetcher, playlistId, useUserMarket) {
-  const fields = [
-    'tracks.items(track(id,uri,name,duration_ms,type,artists(name),album(name,images)))',
-    'tracks.next',
-  ].join(',');
-  const market = useUserMarket ? 'market=from_token&' : '';
+async function fetchPlaylistTracksFromPlaylistDetails(fetcher, playlistId) {
+  const fields =
+    'tracks(total,next,items(track(id,uri,name,duration_ms,type,artists(name),album(name,images))))';
   const spotifyResponse = await fetcher(
     `https://api.spotify.com/v1/playlists/${encodeURIComponent(
       playlistId,
-    )}?${market}fields=${encodeURIComponent(fields)}`,
+    )}?fields=${encodeURIComponent(fields)}`,
   );
 
   if (!spotifyResponse.ok) {
     if (spotifyResponse.status === 403) {
-      throw new SpotifyPlaylistForbiddenError('Playlist Spotify refusee.');
+      throw new SpotifyPlaylistForbiddenError(await readSpotifyError(spotifyResponse));
     }
 
     const message = await readSpotifyError(spotifyResponse);
@@ -719,10 +753,13 @@ async function fetchPlaylistTracksFromPlaylistDetails(fetcher, playlistId, useUs
   }
 
   const payload = await spotifyResponse.json();
-  return (payload.tracks?.items ?? [])
-    .filter((item) => item.track?.type === 'track')
-    .map((item) => mapTrack(item.track))
-    .filter((track) => track.uri);
+  const tracks = mapPlaylistItemsToTracks(payload.tracks?.items);
+
+  if (payload.tracks?.next) {
+    tracks.push(...(await fetchPlaylistTracksFromUrl(fetcher, payload.tracks.next)));
+  }
+
+  return tracks;
 }
 
 function shuffle(items) {
@@ -947,12 +984,12 @@ app.get('/api/spotify/playlists/:playlistId/debug', async (request, response) =>
     const playlist = playlists.find((item) => item.id === playlistId);
     const detailsUrl = `https://api.spotify.com/v1/playlists/${encodeURIComponent(
       playlistId,
-    )}?market=from_token&fields=${encodeURIComponent(
+    )}?fields=${encodeURIComponent(
       'id,name,public,owner(id,display_name),tracks(total,href)',
     )}`;
-    const tracksUrl =
-      playlist?.tracksHref ||
-      `https://api.spotify.com/v1/playlists/${encodeURIComponent(playlistId)}/tracks?limit=1`;
+    const tracksUrl = `https://api.spotify.com/v1/playlists/${encodeURIComponent(
+      playlistId,
+    )}/items?limit=1&additional_types=track`;
 
     const [detailsResponse, tracksResponse] = await Promise.all([
       spotifyFetch(session, detailsUrl),
@@ -1101,6 +1138,13 @@ app.post('/api/blindtests', async (request, response) => {
       db.release();
     }
   } catch (error) {
+    if (error instanceof SpotifyPlaylistForbiddenError) {
+      return response.status(403).json({
+        message:
+          `${error.message} Verifie que la playlist est lisible avec ton compte, puis reconnecte-toi a Spotify si tu viens d'ajouter les permissions playlist.`,
+      });
+    }
+
     return handleServerError(error, response);
   }
 });
