@@ -25,6 +25,7 @@ Copier `.env.example` vers `.env`, puis completer:
 ```env
 PORT=3001
 APP_PORT=3001
+NODE_ENV=development
 FRONTEND_URL=http://127.0.0.1:5173
 SESSION_SECRET=change-me
 SPOTIFY_CLIENT_ID=
@@ -37,6 +38,7 @@ POSTGRES_USER=postgres
 POSTGRES_PASSWORD=postgres
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/spotify_blind_test
 DATABASE_URL_DOCKER=postgresql://postgres:postgres@db:5432/spotify_blind_test
+COOKIE_SAME_SITE=lax
 ```
 
 ## Installation
@@ -60,6 +62,7 @@ psql "$DATABASE_URL" -f db/schema.sql
 Le schema contient les anciennes tables CRUD ainsi que:
 
 - `users`
+- `spotify_auth_sessions`
 - `blindtest_sessions`
 - `blindtest_answers`
 
@@ -95,6 +98,24 @@ docker compose up --build
 ```
 
 L'application build est servie par Express sur `http://127.0.0.1:3001`.
+
+## Configuration production
+
+En production, utiliser des URLs publiques HTTPS et une valeur `SESSION_SECRET` aleatoire longue:
+
+```env
+NODE_ENV=production
+FRONTEND_URL=https://ton-domaine.com
+SPOTIFY_REDIRECT_URI=https://ton-domaine.com/api/auth/spotify/callback
+SESSION_SECRET=une-valeur-random-de-32-caracteres-minimum
+DATABASE_URL=postgresql://...
+COOKIE_SAME_SITE=lax
+```
+
+Avec `NODE_ENV=production`, le serveur refuse de demarrer si `FRONTEND_URL` ou
+`SPOTIFY_REDIRECT_URI` ne sont pas en HTTPS. Les cookies HTTP-only passent aussi en `secure`.
+Les sessions Spotify sont stockees en base dans `spotify_auth_sessions`; les tokens sont chiffres
+avec `SESSION_SECRET`, et le cookie navigateur ne contient qu'un identifiant opaque signe.
 
 ## Routes API
 

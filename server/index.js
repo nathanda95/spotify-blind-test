@@ -19,6 +19,7 @@ const spotifyRedirectUri =
 const sessionSecret = process.env.SESSION_SECRET ?? 'dev-session-secret';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const clientDistPath = path.resolve(__dirname, '../dist');
+const isProduction = process.env.NODE_ENV === 'production';
 const isWatchMode = process.execArgv.includes('--watch');
 const authSessionCachePath =
   process.env.SPOTIFY_AUTH_SESSION_CACHE === 'off'
@@ -36,6 +37,20 @@ const spotifyRateLimitCachePath =
     : isWatchMode
     ? path.resolve(__dirname, '../.spotify-rate-limits.local.json')
     : '';
+const cookieSecure = isProduction || process.env.COOKIE_SECURE === 'true';
+const cookieSameSite = process.env.COOKIE_SAME_SITE ?? 'lax';
+
+if (isProduction) {
+  if (sessionSecret === 'dev-session-secret' || sessionSecret.length < 32) {
+    throw new Error('SESSION_SECRET doit etre une valeur aleatoire de 32 caracteres minimum en production.');
+  }
+  if (!frontendUrl.startsWith('https://')) {
+    throw new Error('FRONTEND_URL doit utiliser https:// en production.');
+  }
+  if (!spotifyRedirectUri.startsWith('https://')) {
+    throw new Error('SPOTIFY_REDIRECT_URI doit utiliser https:// en production.');
+  }
+}
 
 if (!databaseUrl) {
   throw new Error('DATABASE_URL est manquant dans le fichier .env.');
@@ -118,6 +133,9 @@ app.use(
     credentials: true,
   }),
 );
+if (isProduction) {
+  app.set('trust proxy', 1);
+}
 app.use(express.json());
 app.use(express.static(clientDistPath));
 
@@ -139,8 +157,8 @@ function createCookie(response, name, value, maxAgeSeconds) {
   const signed = `${value}.${sign(value)}`;
   response.cookie(name, signed, {
     httpOnly: true,
-    sameSite: 'lax',
-    secure: false,
+    sameSite: cookieSameSite,
+    secure: cookieSecure,
     maxAge: maxAgeSeconds * 1000,
   });
 }
@@ -148,8 +166,8 @@ function createCookie(response, name, value, maxAgeSeconds) {
 function clearCookie(response, name) {
   response.clearCookie(name, {
     httpOnly: true,
-    sameSite: 'lax',
-    secure: false,
+    sameSite: cookieSameSite,
+    secure: cookieSecure,
   });
 }
 
@@ -248,6 +266,122 @@ async function readSpotifyError(response) {
 
 async function readJsonOrNull(response) {
   return response.json().catch(() => null);
+}
+
+function hashSessionId(sid) {
+  return crypto.createHash('sha256').update(sid).digest('hex');
+}
+
+function getTokenEncryptionKey() {
+  return crypto.createHash('sha256').update(sessionSecret).digest();
+}
+
+function encryptToken(value) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', getTokenEncryptionKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(value, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return `${iv.toString('base64')}.${tag.toString('base64')}.${encrypted.toString('base64')}`;
+}
+
+function decryptToken(value) {
+  const [iv, tag, encrypted] = String(value).split('.');
+  const decipher = crypto.createDecipheriv(
+    'aes-256-gcm',
+    getTokenEncryptionKey(),
+    Buffer.from(iv, 'base64'),
+  );
+  decipher.setAuthTag(Buffer.from(tag, 'base64'));
+  return Buffer.concat([
+    decipher.update(Buffer.from(encrypted, 'base64')),
+    decipher.final(),
+  ]).toString('utf8');
+}
+
+async function initAuthSessionStore() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS spotify_auth_sessions (
+      sid_hash TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      spotify_id VARCHAR(255) NOT NULL,
+      access_token TEXT NOT NULL,
+      refresh_token TEXT NOT NULL,
+      expires_at BIGINT NOT NULL,
+      scopes TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await pool.query(
+    'CREATE INDEX IF NOT EXISTS idx_spotify_auth_sessions_user_id ON spotify_auth_sessions(user_id)',
+  );
+}
+
+async function saveAuthSession(sid, session) {
+  const sessionWithId = { ...session, sid };
+  authSessions.set(sid, sessionWithId);
+  persistAuthSessionCache();
+  await pool.query(
+    `INSERT INTO spotify_auth_sessions
+     (sid_hash, user_id, spotify_id, access_token, refresh_token, expires_at, scopes)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (sid_hash)
+     DO UPDATE SET
+       user_id = EXCLUDED.user_id,
+       spotify_id = EXCLUDED.spotify_id,
+       access_token = EXCLUDED.access_token,
+       refresh_token = EXCLUDED.refresh_token,
+       expires_at = EXCLUDED.expires_at,
+       scopes = EXCLUDED.scopes,
+       updated_at = NOW()`,
+    [
+      hashSessionId(sid),
+      session.userId,
+      session.spotifyId,
+      encryptToken(session.accessToken),
+      encryptToken(session.refreshToken),
+      session.expiresAt,
+      (session.scopes ?? []).join(' '),
+    ],
+  );
+}
+
+async function readAuthSession(sid) {
+  const cachedSession = authSessions.get(sid);
+  if (cachedSession) return cachedSession;
+
+  const result = await pool.query(
+    `SELECT user_id, spotify_id, access_token, refresh_token, expires_at, scopes
+     FROM spotify_auth_sessions
+     WHERE sid_hash = $1`,
+    [hashSessionId(sid)],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+
+  try {
+    const session = {
+      sid,
+      userId: row.user_id,
+      spotifyId: row.spotify_id,
+      accessToken: decryptToken(row.access_token),
+      refreshToken: decryptToken(row.refresh_token),
+      expiresAt: Number(row.expires_at),
+      scopes: String(row.scopes ?? '').split(' ').filter(Boolean),
+    };
+    authSessions.set(sid, session);
+    return session;
+  } catch (error) {
+    console.warn('Spotify auth session could not be decrypted and was deleted.');
+    await deleteAuthSession(sid);
+    return null;
+  }
+}
+
+async function deleteAuthSession(sid) {
+  authSessions.delete(sid);
+  persistAuthSessionCache();
+  await pool.query('DELETE FROM spotify_auth_sessions WHERE sid_hash = $1', [hashSessionId(sid)]);
 }
 
 function getSpotifyRateLimitReason(step, response) {
@@ -375,7 +509,9 @@ async function refreshSpotifySession(session) {
   session.accessToken = payload.access_token;
   session.refreshToken = payload.refresh_token ?? session.refreshToken;
   session.expiresAt = Date.now() + payload.expires_in * 1000;
-  persistAuthSessionCache();
+  if (session.sid) {
+    await saveAuthSession(session.sid, session);
+  }
   return session;
 }
 
@@ -423,7 +559,7 @@ async function spotifyAppFetch(url, options = {}) {
 
 async function requireAuth(request, response) {
   const sid = readSignedCookie(request, 'spotify_session');
-  const session = sid ? authSessions.get(sid) : null;
+  const session = sid ? await readAuthSession(sid) : null;
   if (!session) {
     response.status(401).json({ message: 'Spotify non connecte.' });
     return null;
@@ -622,11 +758,10 @@ app.get('/api/auth/spotify/login', (_request, response) => {
   response.redirect(`https://accounts.spotify.com/authorize?${params.toString()}`);
 });
 
-app.post('/api/auth/logout', (request, response) => {
+app.post('/api/auth/logout', async (request, response) => {
   const sid = readSignedCookie(request, 'spotify_session');
   if (sid) {
-    authSessions.delete(sid);
-    persistAuthSessionCache();
+    await deleteAuthSession(sid);
   }
   clearCookie(response, 'spotify_session');
   response.status(204).send();
@@ -712,7 +847,7 @@ app.get('/api/auth/spotify/callback', async (request, response) => {
     );
 
     const sid = crypto.randomBytes(24).toString('hex');
-    authSessions.set(sid, {
+    await saveAuthSession(sid, {
       userId: userResult.rows[0].id,
       spotifyId: profile.id,
       accessToken: tokenPayload.access_token,
@@ -720,7 +855,6 @@ app.get('/api/auth/spotify/callback', async (request, response) => {
       expiresAt: Date.now() + tokenPayload.expires_in * 1000,
       scopes: String(tokenPayload.scope ?? '').split(' ').filter(Boolean),
     });
-    persistAuthSessionCache();
     createCookie(response, 'spotify_session', sid, 30 * 24 * 60 * 60);
     return response.redirect(`${frontendUrl}/dashboard`);
   } catch (error) {
@@ -1208,6 +1342,8 @@ app.delete('/api/todos/:id', async (request, response) => {
 app.use((_request, response) => {
   response.sendFile(path.join(clientDistPath, 'index.html'));
 });
+
+await initAuthSessionStore();
 
 app.listen(port, host, () => {
   console.log(`API Spotify Blindtest lancee sur http://127.0.0.1:${port}`);

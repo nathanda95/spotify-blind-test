@@ -16,6 +16,18 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS spotify_auth_sessions (
+  sid_hash TEXT PRIMARY KEY,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  spotify_id VARCHAR(255) NOT NULL,
+  access_token TEXT NOT NULL,
+  refresh_token TEXT NOT NULL,
+  expires_at BIGINT NOT NULL,
+  scopes TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS blindtest_sessions (
   id SERIAL PRIMARY KEY,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -54,3 +66,4 @@ CREATE TABLE IF NOT EXISTS blindtest_answers (
 
 CREATE INDEX IF NOT EXISTS idx_blindtest_sessions_user_id ON blindtest_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_blindtest_answers_session_id ON blindtest_answers(session_id);
+CREATE INDEX IF NOT EXISTS idx_spotify_auth_sessions_user_id ON spotify_auth_sessions(user_id);
