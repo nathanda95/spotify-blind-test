@@ -2,6 +2,8 @@ node_modules
 dist
 .git
 .env
+.spotify-auth-sessions.local.json
+.spotify-rate-limits.local.json
 *.log
 npm-debug.log*
 Dockerfile
