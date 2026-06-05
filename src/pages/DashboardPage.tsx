@@ -6,9 +6,10 @@ import type { BlindtestSession, User } from '../types';
 type Props = {
   user: User;
   onStartSetup: () => void;
+  onCreateRoom: () => void;
 };
 
-export function DashboardPage({ user, onStartSetup }: Props) {
+export function DashboardPage({ user, onStartSetup, onCreateRoom }: Props) {
   const [likedCount, setLikedCount] = useState<number | null>(null);
   const [history, setHistory] = useState<BlindtestSession[]>([]);
   const [error, setError] = useState('');
@@ -35,8 +36,11 @@ export function DashboardPage({ user, onStartSetup }: Props) {
           <h1>Salut {user.display_name || user.email || 'joueur'}.</h1>
         </div>
         <div className="actions">
+          <button type="button" onClick={onCreateRoom}>
+            Creer une room
+          </button>
           <button type="button" onClick={onStartSetup}>
-            Nouveau blindtest
+            Nouveau blindtest solo
           </button>
           <button
             className="secondary"

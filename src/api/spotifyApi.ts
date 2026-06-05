@@ -7,7 +7,7 @@ export type AuthPayload = {
     spotify_id: string;
     display_name: string;
     email: string;
-  };
+  } | null;
   accessToken: string;
   expiresAt: number;
 };

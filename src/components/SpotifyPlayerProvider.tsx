@@ -112,6 +112,10 @@ export function SpotifyPlayerProvider({ accessToken, children }: Props) {
       isPlaying,
       error,
       async pause() {
+        if (pauseTimeoutRef.current) {
+          window.clearTimeout(pauseTimeoutRef.current);
+          pauseTimeoutRef.current = null;
+        }
         await playerRef.current?.pause();
         setIsPlaying(false);
       },
@@ -122,6 +126,11 @@ export function SpotifyPlayerProvider({ accessToken, children }: Props) {
         }
 
         setError('');
+        if (pauseTimeoutRef.current) {
+          window.clearTimeout(pauseTimeoutRef.current);
+          pauseTimeoutRef.current = null;
+        }
+        await playerRef.current?.pause();
         await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, {
           method: 'PUT',
           headers: {

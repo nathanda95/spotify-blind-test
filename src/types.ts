@@ -1,4 +1,4 @@
-export type AnswerMode = 'title' | 'artist' | 'both';
+export type AnswerMode = 'title' | 'artist' | 'both' | 'either';
 
 export type User = {
   id: number;
