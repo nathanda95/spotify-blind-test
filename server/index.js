@@ -19,6 +19,7 @@ const spotifyRedirectUri =
 const sessionSecret = process.env.SESSION_SECRET ?? 'dev-session-secret';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const clientDistPath = path.resolve(__dirname, '../dist');
+const schemaPath = path.resolve(__dirname, '../db/schema.sql');
 const isProduction = process.env.NODE_ENV === 'production';
 const isWatchMode = process.execArgv.includes('--watch');
 const authSessionCachePath =
@@ -315,6 +316,11 @@ async function initAuthSessionStore() {
   await pool.query(
     'CREATE INDEX IF NOT EXISTS idx_spotify_auth_sessions_user_id ON spotify_auth_sessions(user_id)',
   );
+}
+
+async function initDatabaseSchema() {
+  const schema = fs.readFileSync(schemaPath, 'utf8');
+  await pool.query(schema);
 }
 
 async function saveAuthSession(sid, session) {
@@ -1343,6 +1349,7 @@ app.use((_request, response) => {
   response.sendFile(path.join(clientDistPath, 'index.html'));
 });
 
+await initDatabaseSchema();
 await initAuthSessionStore();
 
 app.listen(port, host, () => {
