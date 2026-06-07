@@ -14,13 +14,15 @@ export function BlindtestGamePage({ game, onGameChange, onFinished }: Props) {
   const [currentIndex, setCurrentIndex] = useState(game.session.currentQuestionIndex);
   const [titleAnswer, setTitleAnswer] = useState('');
   const [artistAnswer, setArtistAnswer] = useState('');
+  const [eitherAnswer, setEitherAnswer] = useState('');
   const [feedback, setFeedback] = useState<BlindtestQuestion | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState('');
 
   const question = game.questions[currentIndex];
-  const needsTitle = game.session.answerMode !== 'artist';
-  const needsArtist = game.session.answerMode !== 'title';
+  const isEitherMode = game.session.answerMode === 'either';
+  const needsTitle = game.session.answerMode !== 'artist' && !isEitherMode;
+  const needsArtist = game.session.answerMode !== 'title' && !isEitherMode;
 
   async function listen() {
     if (!question) return;
@@ -35,8 +37,8 @@ export function BlindtestGamePage({ game, onGameChange, onFinished }: Props) {
     try {
       const result = await answerBlindtest(game.session.id, {
         trackId: question.spotifyTrackId,
-        titleAnswer,
-        artistAnswer,
+        titleAnswer: isEitherMode ? eitherAnswer : titleAnswer,
+        artistAnswer: isEitherMode ? eitherAnswer : artistAnswer,
       });
       const updatedQuestions = game.questions.map((item) =>
         item.spotifyTrackId === question.spotifyTrackId ? result.answer : item,
@@ -62,6 +64,7 @@ export function BlindtestGamePage({ game, onGameChange, onFinished }: Props) {
   async function nextQuestion() {
     setTitleAnswer('');
     setArtistAnswer('');
+    setEitherAnswer('');
     setFeedback(null);
 
     if (currentIndex + 1 >= game.questions.length) {
@@ -101,6 +104,16 @@ export function BlindtestGamePage({ game, onGameChange, onFinished }: Props) {
 
         {!feedback ? (
           <form className="answer-form" onSubmit={submitAnswer}>
+            {isEitherMode && (
+              <label>
+                Titre ou artiste
+                <input
+                  value={eitherAnswer}
+                  onChange={(event) => setEitherAnswer(event.target.value)}
+                  placeholder="Titre ou artiste"
+                />
+              </label>
+            )}
             {needsTitle && (
               <label>
                 Titre

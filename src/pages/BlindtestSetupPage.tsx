@@ -3,6 +3,13 @@ import { createBlindtest } from '../api/blindtestApi';
 import { getPlaylists } from '../api/spotifyApi';
 import type { AnswerMode, BlindtestPayload, SpotifyPlaylist } from '../types';
 
+const answerModeLabels: Record<AnswerMode, string> = {
+  title: 'Titre',
+  artist: 'Artiste',
+  both: 'Titre + artiste',
+  either: 'Titre ou artiste',
+};
+
 type Props = {
   onCreated: (payload: BlindtestPayload) => void;
   onCancel: () => void;
@@ -166,14 +173,14 @@ export function BlindtestSetupPage({ onCreated, onCancel }: Props) {
         <fieldset>
           <legend>Mode de reponse</legend>
           <div className="segmented">
-            {(['title', 'artist', 'both'] as AnswerMode[]).map((value) => (
+            {(['title', 'artist', 'either', 'both'] as AnswerMode[]).map((value) => (
               <button
                 className={answerMode === value ? 'active' : 'secondary'}
                 key={value}
                 type="button"
                 onClick={() => setAnswerMode(value)}
               >
-                {value}
+                {answerModeLabels[value]}
               </button>
             ))}
           </div>

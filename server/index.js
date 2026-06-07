@@ -1,13 +1,17 @@
 import cors from 'cors';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import { createServer } from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import 'dotenv/config';
 import express from 'express';
 import pg from 'pg';
+import { Server } from 'socket.io';
+import { RoomManager } from './roomManager.js';
 
 const app = express();
+const httpServer = createServer(app);
 const port = process.env.PORT ?? 3001;
 const host = process.env.HOST ?? '0.0.0.0';
 const databaseUrl = process.env.DATABASE_URL;
@@ -58,6 +62,7 @@ if (!databaseUrl) {
 }
 
 const pool = new pg.Pool({ connectionString: databaseUrl });
+const roomManager = new RoomManager();
 const authSessions = new Map();
 const oauthStates = new Map();
 const spotifyRateLimits = new Map();
@@ -410,6 +415,30 @@ async function deleteAuthSession(sid) {
   await pool.query('DELETE FROM spotify_auth_sessions WHERE sid_hash = $1', [hashSessionId(sid)]);
 }
 
+async function findStoredRefreshToken(spotifyId) {
+  const cachedSession = [...authSessions.values()].find(
+    (session) => session.spotifyId === spotifyId && session.refreshToken,
+  );
+  if (cachedSession?.refreshToken) return cachedSession.refreshToken;
+
+  const result = await pool.query(
+    `SELECT refresh_token
+     FROM spotify_auth_sessions
+     WHERE spotify_id = $1
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [spotifyId],
+  );
+  const encryptedRefreshToken = result.rows[0]?.refresh_token;
+  if (!encryptedRefreshToken) return '';
+
+  try {
+    return decryptToken(encryptedRefreshToken);
+  } catch {
+    return '';
+  }
+}
+
 function getSpotifyRateLimitReason(step, response) {
   const retryAfter = response.headers.get('retry-after');
   const retryAfterSeconds = Number(retryAfter);
@@ -455,6 +484,17 @@ function isCloseEnough(userAnswer, expected) {
 }
 
 function scoreAnswer(answerMode, expectedTitle, expectedArtists, titleAnswer, artistAnswer) {
+  if (answerMode === 'either') {
+    const answer = titleAnswer || artistAnswer;
+    const titleCorrect = isCloseEnough(answer, expectedTitle);
+    const artistCorrect = expectedArtists.some((artist) => isCloseEnough(answer, artist));
+    return {
+      isTitleCorrect: titleCorrect,
+      isArtistCorrect: artistCorrect,
+      points: titleCorrect || artistCorrect ? 1 : 0,
+    };
+  }
+
   const titleCorrect =
     answerMode !== 'artist' ? isCloseEnough(titleAnswer, expectedTitle) : false;
   const artistCorrect =
@@ -508,6 +548,8 @@ async function ensureFreshToken(session) {
   return refreshSpotifySession(session);
 }
 
+class SpotifyRefreshTokenError extends Error {}
+
 async function refreshSpotifySession(session) {
   if (!spotifyClientId || !spotifyClientSecret) {
     throw new Error('Configuration Spotify incomplete.');
@@ -528,7 +570,10 @@ async function refreshSpotifySession(session) {
   });
 
   if (!response.ok) {
-    throw new Error('Refresh token Spotify impossible.');
+    const message = await readSpotifyError(response);
+    throw new SpotifyRefreshTokenError(
+      `Session Spotify expiree ou invalide (${response.status}: ${message}).`,
+    );
   }
 
   const payload = await response.json();
@@ -590,7 +635,20 @@ async function requireAuth(request, response) {
     response.status(401).json({ message: 'Spotify non connecte.' });
     return null;
   }
-  return ensureFreshToken(session);
+
+  try {
+    return await ensureFreshToken(session);
+  } catch (error) {
+    if (error instanceof SpotifyRefreshTokenError) {
+      await deleteAuthSession(sid);
+      clearCookie(response, 'spotify_session');
+      response.status(401).json({
+        message: 'Session Spotify expiree. Reconnecte-toi avec Spotify.',
+      });
+      return null;
+    }
+    throw error;
+  }
 }
 
 async function fetchLikedTracks(session) {
@@ -662,7 +720,7 @@ async function fetchPlaylistTracks(session, playlistId, tracksHref = '') {
     {
       label: 'playlist details with user token',
       run: () =>
-      fetchPlaylistTracksFromPlaylistDetails(
+        fetchPlaylistTracksFromPlaylistDetails(
         (url) => spotifyFetch(session, url),
         cleanPlaylistId,
       ),
@@ -766,6 +824,18 @@ function shuffle(items) {
   return [...items].sort(() => crypto.randomInt(0, 1000) - 500);
 }
 
+function hasPlaylistScopes(session) {
+  const grantedScopes = session.scopes ?? [];
+  return (
+    grantedScopes.includes('playlist-read-private') &&
+    grantedScopes.includes('playlist-read-collaborative')
+  );
+}
+
+function missingPlaylistScopesMessage() {
+  return "Token Spotify sans permissions playlist. Deconnecte-toi, supprime l'autorisation de cette app dans ton compte Spotify, puis reconnecte-toi.";
+}
+
 app.get('/api/health', async (_request, response) => {
   try {
     await pool.query('SELECT 1');
@@ -788,6 +858,7 @@ app.get('/api/auth/spotify/login', (_request, response) => {
 
   const state = crypto.randomBytes(16).toString('hex');
   oauthStates.set(state, Date.now() + 10 * 60 * 1000);
+  createCookie(response, 'spotify_oauth_state', state, 10 * 60);
 
   const params = new URLSearchParams({
     response_type: 'code',
@@ -814,10 +885,17 @@ app.get('/api/auth/spotify/callback', async (request, response) => {
   if (!requireSpotifyConfig(response)) return;
 
   const { code, state } = request.query;
+  const stateFromCookie = readSignedCookie(request, 'spotify_oauth_state');
   const stateExpiresAt = oauthStates.get(String(state));
   oauthStates.delete(String(state));
+  clearCookie(response, 'spotify_oauth_state');
 
-  if (!code || !stateExpiresAt || stateExpiresAt < Date.now()) {
+  if (
+    !code ||
+    String(state) !== stateFromCookie ||
+    (stateExpiresAt && stateExpiresAt < Date.now())
+  ) {
+    console.warn('Spotify OAuth callback rejected because state validation failed.');
     return response.redirect(`${frontendUrl}/?auth=failed`);
   }
 
@@ -843,6 +921,8 @@ app.get('/api/auth/spotify/callback', async (request, response) => {
     });
 
     if (!tokenResponse.ok) {
+      const message = await readSpotifyError(tokenResponse);
+      console.warn(`Spotify OAuth token exchange failed (${tokenResponse.status}): ${message}`);
       const authReason =
         tokenResponse.status === 429
           ? getSpotifyRateLimitReason('oauth-token', tokenResponse)
@@ -864,6 +944,8 @@ app.get('/api/auth/spotify/callback', async (request, response) => {
       headers: { Authorization: `Bearer ${tokenPayload.access_token}` },
     });
     if (!profileResponse.ok) {
+      const message = await readSpotifyError(profileResponse);
+      console.warn(`Spotify profile fetch failed (${profileResponse.status}): ${message}`);
       const authReason =
         profileResponse.status === 429
           ? getSpotifyRateLimitReason('current-user-profile', profileResponse)
@@ -890,11 +972,17 @@ app.get('/api/auth/spotify/callback', async (request, response) => {
     );
 
     const sid = crypto.randomBytes(24).toString('hex');
+    const refreshToken = tokenPayload.refresh_token || (await findStoredRefreshToken(profile.id));
+    if (!refreshToken) {
+      console.warn('Spotify OAuth callback did not return a refresh token and no stored token exists.');
+      return response.redirect(`${frontendUrl}/?auth=failed`);
+    }
+
     await saveAuthSession(sid, {
       userId: userResult.rows[0].id,
       spotifyId: profile.id,
       accessToken: tokenPayload.access_token,
-      refreshToken: tokenPayload.refresh_token,
+      refreshToken,
       expiresAt: Date.now() + tokenPayload.expires_in * 1000,
       scopes: String(tokenPayload.scope ?? '').split(' ').filter(Boolean),
     });
@@ -913,13 +1001,33 @@ app.post('/api/auth/spotify/refresh', async (request, response) => {
 });
 
 app.get('/api/auth/me', async (request, response) => {
-  const session = await requireAuth(request, response);
-  if (!session) return;
+  const sid = readSignedCookie(request, 'spotify_session');
+  const storedSession = sid ? await readAuthSession(sid) : null;
+  if (!storedSession) {
+    return response.json({ user: null, accessToken: '', expiresAt: 0, scopes: [] });
+  }
+
+  let session;
+  try {
+    session = await ensureFreshToken(storedSession);
+  } catch (error) {
+    if (error instanceof SpotifyRefreshTokenError) {
+      await deleteAuthSession(sid);
+      clearCookie(response, 'spotify_session');
+      return response.json({ user: null, accessToken: '', expiresAt: 0, scopes: [] });
+    }
+    throw error;
+  }
 
   const result = await pool.query(
     'SELECT id, spotify_id, display_name, email FROM users WHERE id = $1',
     [session.userId],
   );
+  if (result.rowCount === 0) {
+    await deleteAuthSession(sid);
+    clearCookie(response, 'spotify_session');
+    return response.json({ user: null, accessToken: '', expiresAt: 0, scopes: [] });
+  }
   response.json({
     user: result.rows[0],
     accessToken: session.accessToken,
@@ -1032,7 +1140,7 @@ app.post('/api/blindtests', async (request, response) => {
     !Number.isInteger(count) ||
     count < 1 ||
     count > 100 ||
-    !['title', 'artist', 'both'].includes(answerMode)
+    !['title', 'artist', 'both', 'either'].includes(answerMode)
   ) {
     return response.status(400).json({ message: 'Configuration de blindtest invalide.' });
   }
@@ -1045,14 +1153,9 @@ app.post('/api/blindtests', async (request, response) => {
     let sourceTracks = [];
 
     if (sourceType === 'playlist') {
-      const grantedScopes = session.scopes ?? [];
-      const hasPlaylistScopes =
-        grantedScopes.includes('playlist-read-private') &&
-        grantedScopes.includes('playlist-read-collaborative');
-      if (!hasPlaylistScopes) {
+      if (!hasPlaylistScopes(session)) {
         return response.status(403).json({
-          message:
-            "Token Spotify sans permissions playlist. Deconnecte-toi, supprime l'autorisation de cette app dans ton compte Spotify, puis reconnecte-toi.",
+          message: missingPlaylistScopesMessage(),
         });
       }
 
@@ -1389,6 +1492,241 @@ app.delete('/api/todos/:id', async (request, response) => {
   }
 });
 
+async function getSocketAuthSession(socket) {
+  const raw = parseCookies(socket.handshake.headers.cookie ?? '').spotify_session;
+  if (!raw) return null;
+  const [sid, signature] = raw.split('.');
+  if (!sid || signature !== sign(sid)) return null;
+  const session = await readAuthSession(sid);
+  if (!session) return null;
+
+  try {
+    return await ensureFreshToken(session);
+  } catch (error) {
+    if (error instanceof SpotifyRefreshTokenError) {
+      await deleteAuthSession(sid);
+      throw new Error('Session Spotify expiree. Reconnecte-toi avec Spotify.');
+    }
+    throw error;
+  }
+}
+
+async function getSocketHostUser(socket) {
+  const session = await getSocketAuthSession(socket);
+  if (!session) return null;
+
+  const result = await pool.query(
+    'SELECT id, spotify_id, display_name, email FROM users WHERE id = $1',
+    [session.userId],
+  );
+  if (result.rowCount === 0) return null;
+  return { session, user: result.rows[0] };
+}
+
+function validateRoomSetup(payload = {}) {
+  const sourceType = payload.sourceType === 'playlist' ? 'playlist' : 'liked';
+  const playlistId = String(payload.playlistId ?? '').trim();
+  const questionCount = Number(payload.questionCount);
+  const listenDurationSeconds = Number(payload.listenDurationSeconds);
+  const answerMode = ['title', 'artist', 'both', 'either'].includes(payload.answerMode)
+    ? payload.answerMode
+    : '';
+
+  if (sourceType === 'playlist' && !playlistId) {
+    throw new Error('Playlist obligatoire.');
+  }
+  if (!Number.isInteger(questionCount) || questionCount < 1 || questionCount > 100) {
+    throw new Error('Nombre de questions invalide.');
+  }
+  if (!answerMode) {
+    throw new Error('Mode de reponse invalide.');
+  }
+  if (![5, 10, 15].includes(listenDurationSeconds)) {
+    throw new Error('Duree ecoute invalide.');
+  }
+
+  return { sourceType, playlistId, questionCount, answerMode, listenDurationSeconds };
+}
+
+async function buildRoomQuestions(session, setup) {
+  let sourceTracks = [];
+  if (setup.sourceType === 'playlist') {
+    if (!hasPlaylistScopes(session)) {
+      throw new Error(missingPlaylistScopesMessage());
+    }
+
+    const playlists = await fetchUserPlaylists(session);
+    const selectedPlaylist = playlists.find((playlist) => playlist.id === setup.playlistId);
+    if (!selectedPlaylist) throw new Error('Playlist introuvable.');
+    sourceTracks = await fetchPlaylistTracks(
+      session,
+      setup.playlistId,
+      selectedPlaylist.tracksHref,
+    );
+  } else {
+    sourceTracks = await fetchLikedTracks(session);
+  }
+
+  if (sourceTracks.length === 0) {
+    throw new Error('Aucun titre exploitable trouve pour cette source.');
+  }
+
+  return shuffle(sourceTracks).slice(0, Math.min(setup.questionCount, sourceTracks.length));
+}
+
+function emitRoomState(io, room) {
+  io.to(room.code).emit('roomUpdated', roomManager.publicRoom(room));
+}
+
+function emitQuestion(io, room) {
+  io.to(room.code).emit('questionStarted', roomManager.publicQuestion(room));
+  io.to(room.hostSocketId).emit('hostPlayTrack', roomManager.hostQuestion(room));
+}
+
+function emitRoomError(socket, error) {
+  socket.emit('roomError', {
+    message: error instanceof Error && error.message ? error.message : 'Action impossible.',
+  });
+}
+
+function setupRoomSockets() {
+  const io = new Server(httpServer, {
+    cors: {
+      origin: frontendUrl,
+      credentials: true,
+    },
+  });
+
+  io.on('connection', (socket) => {
+    socket.on('createRoom', async () => {
+      try {
+        const auth = await getSocketHostUser(socket);
+        if (!auth) throw new Error('Connexion Spotify requise pour creer une room.');
+
+        const { room, player } = roomManager.createRoom(socket.id, auth.user);
+        socket.join(room.code);
+        socket.emit('roomCreated', {
+          room: roomManager.publicRoom(room),
+          playerId: player.id,
+          role: 'host',
+        });
+        emitRoomState(io, room);
+      } catch (error) {
+        emitRoomError(socket, error);
+      }
+    });
+
+    socket.on('joinRoom', (payload = {}) => {
+      try {
+        const { room, player } = roomManager.joinRoom(payload.code, socket.id, payload.pseudo);
+        socket.join(room.code);
+        socket.emit('roomJoined', {
+          room: roomManager.publicRoom(room),
+          playerId: player.id,
+          role: 'guest',
+        });
+        socket.to(room.code).emit('playerJoined', roomManager.publicRoom(room));
+        emitRoomState(io, room);
+      } catch (error) {
+        emitRoomError(socket, error);
+      }
+    });
+
+    socket.on('startGame', async (payload = {}) => {
+      try {
+        const setup = validateRoomSetup(payload);
+        const auth = await getSocketAuthSession(socket);
+        if (!auth) throw new Error('Connexion Spotify requise pour lancer la partie.');
+
+        const tracks = await buildRoomQuestions(auth, setup);
+        const room = roomManager.startGame(payload.code, socket.id, setup, tracks);
+        io.to(room.code).emit('gameStarted', roomManager.publicRoom(room));
+        emitQuestion(io, room);
+        io.to(room.code).emit('leaderboardUpdated', roomManager.leaderboard(room));
+      } catch (error) {
+        emitRoomError(socket, error);
+      }
+    });
+
+    socket.on('submitAnswer', (payload = {}) => {
+      try {
+        const { room, answer, ignored } = roomManager.submitAnswer(
+          payload.code,
+          socket.id,
+          payload,
+        );
+        if (ignored) return;
+
+        io.to(room.code).emit('questionLocked', answer);
+        io.to(room.code).emit('leaderboardUpdated', roomManager.leaderboard(room));
+        emitRoomState(io, room);
+      } catch (error) {
+        emitRoomError(socket, error);
+      }
+    });
+
+    socket.on('nextQuestion', (payload = {}) => {
+      try {
+        const { room, finished } = roomManager.nextQuestion(payload.code, socket.id);
+        if (finished) {
+          io.to(room.code).emit('gameFinished', {
+            room: roomManager.publicRoom(room),
+            leaderboard: roomManager.leaderboard(room),
+          });
+          emitRoomState(io, room);
+          return;
+        }
+
+        emitRoomState(io, room);
+        emitQuestion(io, room);
+      } catch (error) {
+        emitRoomError(socket, error);
+      }
+    });
+
+    socket.on('leaveRoom', () => {
+      const result = roomManager.handleDisconnect(socket.id);
+      if (!result) return;
+      if (result.closed) {
+        io.to(result.room.code).emit('roomClosed', {
+          reason: 'Le host a quitte la room.',
+        });
+        io.in(result.room.code).socketsLeave(result.room.code);
+        return;
+      }
+      socket.leave(result.room.code);
+      socket.to(result.room.code).emit('playerLeft', roomManager.publicRoom(result.room));
+      emitRoomState(io, result.room);
+    });
+
+    socket.on('closeRoom', (payload = {}) => {
+      try {
+        const room = roomManager.closeRoom(payload.code, socket.id);
+        io.to(room.code).emit('roomClosed', { reason: 'Room fermee par le host.' });
+        io.in(room.code).socketsLeave(room.code);
+      } catch (error) {
+        emitRoomError(socket, error);
+      }
+    });
+
+    socket.on('disconnect', () => {
+      const result = roomManager.handleDisconnect(socket.id);
+      if (!result) return;
+      if (result.closed) {
+        io.to(result.room.code).emit('roomClosed', {
+          reason: 'Le host sest deconnecte.',
+        });
+        io.in(result.room.code).socketsLeave(result.room.code);
+        return;
+      }
+      socket.to(result.room.code).emit('playerLeft', roomManager.publicRoom(result.room));
+      emitRoomState(io, result.room);
+    });
+  });
+}
+
+setupRoomSockets();
+
 app.use((_request, response) => {
   response.sendFile(path.join(clientDistPath, 'index.html'));
 });
@@ -1396,6 +1734,6 @@ app.use((_request, response) => {
 await initDatabaseSchema();
 await initAuthSessionStore();
 
-app.listen(port, host, () => {
+httpServer.listen(port, host, () => {
   console.log(`API Spotify Blindtest lancee sur http://127.0.0.1:${port}`);
 });

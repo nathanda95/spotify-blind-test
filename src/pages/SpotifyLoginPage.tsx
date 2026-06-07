@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
 
 type Props = {
   loginUrl: string;
   error?: string;
+  roomError?: string;
+  onJoinRoom: (payload: { code: string; pseudo: string }) => void;
 };
 
 function formatRetryDelay(value: string | null) {
@@ -28,13 +30,20 @@ function formatRetryDelay(value: string | null) {
   return value;
 }
 
-export function SpotifyLoginPage({ loginUrl, error }: Props) {
+export function SpotifyLoginPage({ loginUrl, error, roomError, onJoinRoom }: Props) {
   const [authError] = useState(() => new URLSearchParams(window.location.search).get('auth'));
+  const [code, setCode] = useState('');
+  const [pseudo, setPseudo] = useState('');
   const retryAfter = useMemo(() => {
     if (!authError?.startsWith('rate-limited')) return null;
     return formatRetryDelay(authError.replace(/^rate-limited-?/, '') || null);
   }, [authError]);
   const isRateLimited = authError?.startsWith('rate-limited');
+
+  function handleJoin(event: FormEvent) {
+    event.preventDefault();
+    onJoinRoom({ code: code.trim().toUpperCase(), pseudo: pseudo.trim() });
+  }
 
   useEffect(() => {
     if (authError) {
@@ -65,6 +74,34 @@ export function SpotifyLoginPage({ loginUrl, error }: Props) {
           Se connecter avec Spotify
         </a>
       </section>
+
+      <form className="panel join-panel" onSubmit={handleJoin}>
+        <div>
+          <p className="eyebrow">Multijoueur</p>
+          <h2>Rejoindre une room</h2>
+          <p className="muted">Aucun compte Spotify requis pour les invites.</p>
+        </div>
+        {roomError && <p className="error">{roomError}</p>}
+        <label>
+          Code de room
+          <input
+            value={code}
+            onChange={(event) => setCode(event.target.value.toUpperCase())}
+            placeholder="ABC123"
+            maxLength={6}
+          />
+        </label>
+        <label>
+          Pseudo
+          <input
+            value={pseudo}
+            onChange={(event) => setPseudo(event.target.value)}
+            placeholder="Ton pseudo"
+            maxLength={32}
+          />
+        </label>
+        <button type="submit">Rejoindre</button>
+      </form>
     </main>
   );
 }

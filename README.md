@@ -149,10 +149,73 @@ CRUD historique:
 - `PUT /api/todos/:id`
 - `DELETE /api/todos/:id`
 
+## Mode room multijoueur
+
+Le mode multijoueur utilise Socket.IO et garde les rooms uniquement en memoire cote serveur. Aucune
+table PostgreSQL n'est creee pour ces parties: elles disparaissent au redemarrage de l'API ou quand
+le host ferme la room.
+
+Flux principal:
+
+1. Le host se connecte avec Spotify Premium.
+2. Depuis le dashboard, il clique sur `Creer une room`.
+3. Le serveur genere un code court, par exemple `ABC123`.
+4. Les invites rejoignent depuis l'accueil avec le code et un pseudo, sans compte Spotify.
+5. Le host choisit la source (`Titres likes` ou `Playlist`), le nombre de questions, le mode de
+   reponse (`title`, `artist`, `either`, `both`) et la duree d'ecoute.
+6. Le serveur genere les questions en memoire depuis Spotify, sans envoyer les bonnes reponses aux
+   invites avant correction.
+7. A chaque question, seul le navigateur du host recoit l'URI Spotify et lance la lecture via le
+   Spotify Web Playback SDK.
+8. Le premier joueur qui valide verrouille la question pour tout le monde. Les reponses suivantes
+   sont ignorees.
+9. Le classement est mis a jour apres chaque question, puis trie a la fin par score, nombre de
+   bonnes reponses, puis temps moyen de reponse.
+
+Regle audio importante:
+
+- Les invites ne recoivent pas de lecture Spotify dans leur navigateur.
+- Seul le host a besoin d'un compte Spotify Premium.
+- Les invites doivent entendre la musique via le son du host: enceinte dans la piece, partage audio
+  en visio/stream, ou autre diffusion externe.
+- Quand le host passe a la question suivante, quand une question est verrouillee, ou quand la partie
+  se termine, le frontend host appelle `pause()` sur le Web Playback SDK avant de continuer.
+
+Events Socket.IO:
+
+Client vers serveur:
+
+- `createRoom`
+- `joinRoom`
+- `leaveRoom`
+- `startGame`
+- `submitAnswer`
+- `nextQuestion`
+- `closeRoom`
+
+Serveur vers client:
+
+- `roomCreated`
+- `roomJoined`
+- `roomUpdated`
+- `playerJoined`
+- `playerLeft`
+- `gameStarted`
+- `questionStarted`
+- `hostPlayTrack`
+- `questionLocked`
+- `leaderboardUpdated`
+- `gameFinished`
+- `roomClosed`
+- `roomError`
+
 ## Limitations connues
 
 - Aucun fichier audio n'est telecharge: la lecture passe uniquement par Spotify Web Playback SDK.
-- Le MVP suppose un compte Spotify Premium.
+- Le mode solo suppose un compte Spotify Premium. En multijoueur, seul le host doit etre Premium.
 - Les tokens Spotify sont gardes en memoire serveur via cookie HTTP-only; un redemarrage serveur demande une reconnexion.
 - Le MVP genere les parties depuis les titres likes ou une playlist de l'utilisateur.
 - Le scoring est tolerant, mais reste volontairement simple.
+- Le mode `either` donne 1 point si la reponse correspond au titre ou a un artiste.
+- Les rooms multijoueur ne sont pas persistantes et ne peuvent pas etre rouvertes apres fermeture.
+- Si le host se deconnecte, la room est fermee automatiquement.
