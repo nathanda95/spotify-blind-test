@@ -167,8 +167,8 @@ Flux principal:
    invites avant correction.
 7. A chaque question, seul le navigateur du host recoit l'URI Spotify et lance la lecture via le
    Spotify Web Playback SDK.
-8. Le premier joueur qui valide verrouille la question pour tout le monde. Les reponses suivantes
-   sont ignorees.
+8. La question reste ouverte apres une mauvaise reponse. La premiere bonne reponse verrouille la
+   question pour tout le monde, puis les reponses suivantes sont ignorees.
 9. Le classement est mis a jour apres chaque question, puis trie a la fin par score, nombre de
    bonnes reponses, puis temps moyen de reponse.
 
