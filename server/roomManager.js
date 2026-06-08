@@ -246,12 +246,15 @@ export class RoomManager {
     );
     const responseMs = room.questionStartedAt ? Date.now() - room.questionStartedAt : 0;
 
-    room.currentQuestionLockedByPlayerId = player.id;
-    player.score += scoring.points;
-    if (scoring.points > 0) player.correctAnswers += 1;
-    if (responseMs > 0) {
-      player.totalResponseMs += responseMs;
-      player.responseCount += 1;
+    const isCorrect = scoring.points > 0;
+    if (isCorrect) {
+      room.currentQuestionLockedByPlayerId = player.id;
+      player.score += scoring.points;
+      player.correctAnswers += 1;
+      if (responseMs > 0) {
+        player.totalResponseMs += responseMs;
+        player.responseCount += 1;
+      }
     }
 
     const answer = {
@@ -270,7 +273,7 @@ export class RoomManager {
       },
     };
     room.answers.push(answer);
-    return { room, answer, ignored: false };
+    return { room, answer, ignored: false, locked: isCorrect };
   }
 
   nextQuestion(code, socketId) {

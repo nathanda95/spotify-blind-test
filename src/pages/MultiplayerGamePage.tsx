@@ -58,6 +58,11 @@ export function MultiplayerGamePage({
     void spotifyPlayer.pause();
   }, [isHost, lockedAnswer?.questionIndex]);
 
+  async function listen() {
+    if (!hostTrack || !spotifyPlayer?.isReady) return;
+    await spotifyPlayer.playTrack(hostTrack.trackUri, room.listenDurationSeconds);
+  }
+
   function submit(event: FormEvent) {
     event.preventDefault();
     if (isLocked) return;
@@ -104,11 +109,18 @@ export function MultiplayerGamePage({
           </div>
 
           {isHost ? (
-            <p className="muted">
-              {spotifyPlayer?.isReady
-                ? 'Lecture lancee sur ce navigateur.'
-                : 'Player Spotify en preparation...'}
-            </p>
+            <>
+              <button
+                type="button"
+                onClick={() => void listen()}
+                disabled={!hostTrack || !spotifyPlayer?.isReady}
+              >
+                {spotifyPlayer?.isPlaying
+                  ? 'Lecture...'
+                  : `Ecouter ${room.listenDurationSeconds}s`}
+              </button>
+              {!spotifyPlayer?.isReady && <p className="muted">Player Spotify en preparation...</p>}
+            </>
           ) : (
             <p className="muted">Ecoute le son du host, puis reponds ici.</p>
           )}

@@ -1650,12 +1650,13 @@ function setupRoomSockets() {
 
     socket.on('submitAnswer', (payload = {}) => {
       try {
-        const { room, answer, ignored } = roomManager.submitAnswer(
+        const { room, answer, ignored, locked } = roomManager.submitAnswer(
           payload.code,
           socket.id,
           payload,
         );
         if (ignored) return;
+        if (!locked) return;
 
         io.to(room.code).emit('questionLocked', answer);
         io.to(room.code).emit('leaderboardUpdated', roomManager.leaderboard(room));
